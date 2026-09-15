@@ -1,0 +1,8 @@
+.env
+*.pem
+*.key
+id_ed25519*
+infra/terraform/.launch_*.json
+infra/terraform/.terraform/
+infra/terraform/*.tfstate*
+monitoring/prometheus.yml
