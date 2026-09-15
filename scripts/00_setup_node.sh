@@ -45,9 +45,11 @@ sudo apt-get install -y python3-venv build-essential git jq
 python3 -m venv ~/venv
 source ~/venv/bin/activate
 pip install --upgrade pip
-# CUDA 12.1 wheels; adjust if a node ships a different CUDA version (`nvidia-smi` to check).
-pip install torch --index-url https://download.pytorch.org/whl/cu121
+# vLLM pins the exact torch build it needs, so installing torch separately first just
+# means downloading multiple GB twice and letting vllm overwrite it (possibly with a
+# different CUDA build than the one requested). Install vllm and take its torch.
 pip install vllm locust requests
+python -c "import torch; print('torch', torch.__version__, 'cuda', torch.version.cuda, 'gpus', torch.cuda.device_count())"
 
 echo ""
 echo "Setup complete. Exporters: http://$(curl -s ifconfig.me):9400/metrics (DCGM), :9100/metrics (node)."

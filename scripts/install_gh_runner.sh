@@ -10,9 +10,12 @@ REPO_URL="$1"
 REG_TOKEN="$2"
 LABEL="$3"
 
-# Bump this if GitHub has shipped a newer runner release by the time you run this:
-# https://github.com/actions/runner/releases
-RUNNER_VERSION="2.321.0"
+# Resolved at run time — a pinned version goes stale and GitHub can refuse to register
+# a runner that's too old. Falls back to a known-good version if the API call fails.
+RUNNER_VERSION="${RUNNER_VERSION:-$(curl -fsSL https://api.github.com/repos/actions/runner/releases/latest \
+  | grep -m1 '"tag_name"' | sed -E 's/.*"v?([^"]+)".*/\1/')}"
+RUNNER_VERSION="${RUNNER_VERSION:-2.337.0}"
+echo "Installing GitHub Actions runner v${RUNNER_VERSION}"
 
 mkdir -p ~/actions-runner && cd ~/actions-runner
 if [[ ! -f config.sh ]]; then

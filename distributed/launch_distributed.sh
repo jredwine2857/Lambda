@@ -15,6 +15,20 @@ esac
 
 source ~/venv/bin/activate 2>/dev/null || true
 
+# NCCL picks a network interface on its own and often picks a wrong one — notably
+# docker0 (172.17.0.1), which exists on these nodes because the setup script installs
+# Docker, and which is unroutable between hosts. The symptom is a silent hang at
+# init rather than a clean error, so exclude the local-only interfaces explicitly.
+export NCCL_SOCKET_IFNAME="${NCCL_SOCKET_IFNAME:-^docker0,lo}"
+# Same reasoning for the rendezvous/store traffic.
+export GLOO_SOCKET_IFNAME="${GLOO_SOCKET_IFNAME:-$NCCL_SOCKET_IFNAME}"
+# Prints the interface and transport NCCL actually chose — this is the output you'd
+# screenshot for a customer to prove traffic took the fast path.
+export NCCL_DEBUG="${NCCL_DEBUG:-INFO}"
+
+echo "== interfaces on this node =="
+ip -brief address 2>/dev/null || true
+
 torchrun \
   --nnodes=2 \
   --nproc_per_node=1 \
