@@ -45,11 +45,20 @@ sudo apt-get install -y python3-venv build-essential git jq
 python3 -m venv ~/venv
 source ~/venv/bin/activate
 pip install --upgrade pip
-# vLLM pins the exact torch build it needs, so installing torch separately first just
-# means downloading multiple GB twice and letting vllm overwrite it (possibly with a
-# different CUDA build than the one requested). Install vllm and take its torch.
-pip install vllm locust requests
-python -c "import torch; print('torch', torch.__version__, 'cuda', torch.version.cuda, 'gpus', torch.cuda.device_count())"
+# Lambda's A10 image ships a driver that supports up to CUDA 12.8. Unpinned vllm pulls
+# a torch built for CUDA 13.0, which fails at CUDA init ("driver too old, found 12080").
+# vllm 0.11.0 pins torch==2.8.0, whose wheel is built for CUDA 12.8. Its transformers
+# bound is open-ended and transformers 5.x postdates it, so cap that too.
+pip install "vllm==0.11.0" "transformers>=4.55.2,<5" locust requests
+
+# device_count() reports the GPU even when CUDA can't initialize, so allocate a tensor
+# to force a real init — a bad torch/driver pairing should fail here, not in NCCL.
+python - <<'PY'
+import torch
+torch.zeros(1, device="cuda")
+print("torch", torch.__version__, "cuda", torch.version.cuda,
+      "gpus", torch.cuda.device_count(), "- CUDA init OK")
+PY
 
 echo ""
 echo "Setup complete. Exporters: http://$(curl -s ifconfig.me):9400/metrics (DCGM), :9100/metrics (node)."
