@@ -29,12 +29,29 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/cache/restore@v4
+        with:
+          path: |
+            infra/terraform/terraform.tfstate
+            infra/terraform/.launch_node0.json
+            infra/terraform/.launch_node1.json
+          key: tfstate-${{ github.run_id }}
+          restore-keys: tfstate-
       - uses: hashicorp/setup-terraform@v3
       - name: terraform destroy
         working-directory: infra/terraform
         run: |
           terraform init
           terraform destroy -auto-approve
+      - uses: actions/cache/save@v4
+        if: always()
+        continue-on-error: true   # e.g. nothing existed yet to cache — not a real failure
+        with:
+          path: |
+            infra/terraform/terraform.tfstate
+            infra/terraform/.launch_node0.json
+            infra/terraform/.launch_node1.json
+          key: tfstate-${{ github.run_id }}-destroyonly
 
   # ---------------------------------------------------------------------------------
   provision:
@@ -45,6 +62,19 @@ jobs:
       node1_ip: ${{ steps.ips.outputs.node1_ip }}
     steps:
       - uses: actions/checkout@v4
+      # Terraform's local state file only lives on this job's throwaway VM — without
+      # this, `teardown` (a separate job, separate VM) has no idea what was created
+      # and silently destroys nothing. Cache it under a key that changes every run
+      # (so `save` below always writes a fresh entry) but restores from the latest
+      # prior run via the `tfstate-` prefix.
+      - uses: actions/cache/restore@v4
+        with:
+          path: |
+            infra/terraform/terraform.tfstate
+            infra/terraform/.launch_node0.json
+            infra/terraform/.launch_node1.json
+          key: tfstate-${{ github.run_id }}
+          restore-keys: tfstate-
       - uses: hashicorp/setup-terraform@v3
 
       - name: terraform apply
@@ -103,6 +133,18 @@ jobs:
             ssh -o StrictHostKeyChecking=no -i ~/.ssh/id_ed25519 ubuntu@"$ip" \
               "bash 00_setup_node.sh && bash install_gh_runner.sh '$repo_url' '$reg_token' 'gpu-lab-node${rank}'"
           done
+
+      # Runs even if a prior step in this job failed (e.g. instances launched but
+      # never went active) — that's exactly when `teardown` most needs real state.
+      - uses: actions/cache/save@v4
+        if: always()
+        continue-on-error: true
+        with:
+          path: |
+            infra/terraform/terraform.tfstate
+            infra/terraform/.launch_node0.json
+            infra/terraform/.launch_node1.json
+          key: tfstate-${{ github.run_id }}-provision
 
   # ---------------------------------------------------------------------------------
   # NCCL bandwidth test — both jobs depend only on `provision`, so GitHub Actions
@@ -189,6 +231,16 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      # Pulls in whatever `provision` (a separate VM) actually created — without this
+      # restore, this job has no state and "successfully" destroys nothing.
+      - uses: actions/cache/restore@v4
+        with:
+          path: |
+            infra/terraform/terraform.tfstate
+            infra/terraform/.launch_node0.json
+            infra/terraform/.launch_node1.json
+          key: tfstate-${{ github.run_id }}
+          restore-keys: tfstate-
       - uses: hashicorp/setup-terraform@v3
 
       - name: Deregister self-hosted runners (best-effort)
@@ -205,3 +257,13 @@ jobs:
         run: |
           terraform init
           terraform destroy -auto-approve
+
+      - uses: actions/cache/save@v4
+        if: always()
+        continue-on-error: true
+        with:
+          path: |
+            infra/terraform/terraform.tfstate
+            infra/terraform/.launch_node0.json
+            infra/terraform/.launch_node1.json
+          key: tfstate-${{ github.run_id }}-teardown

@@ -96,6 +96,21 @@ runners triggered by `pull_request` (even from your own public repo's forks) is 
 known way to let arbitrary PR code execute on your infrastructure — never wire this
 trigger to anything but a manual, write-access-gated event.
 
+**State-persistence note:** `provision`, `teardown`, and `destroy-only` each run on a
+separate, throwaway GitHub-hosted VM. Terraform's default `local` state backend is a
+file on disk, which does *not* survive past the job that created it — so without extra
+work, `teardown` would run `terraform destroy` against an empty state and silently
+destroy nothing (this happened once during development: `terraform apply` succeeded,
+but `teardown` reported "0 destroyed" because it had no idea anything existed). The fix
+is `actions/cache`, keyed `tfstate-<run_id>-<job>` for writes and restored via the
+`tfstate-` prefix (which resolves to the most recent matching entry) — every job that
+touches Terraform state restores the latest copy first and saves its own copy after,
+so state flows forward across jobs and across separate runs (which is also what makes
+`destroy_only` mode work as an emergency cleanup for a run that died mid-pipeline). A
+real remote backend (S3, Terraform Cloud) is the standard production answer to this;
+committing state straight into git was never on the table here since this repo is
+public and the state contains the Lambda API key.
+
 ### One-time setup
 
 ```bash
