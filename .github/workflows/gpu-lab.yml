@@ -94,10 +94,20 @@ jobs:
           id0=$(jq -r '.data.instance_ids[0]' terraform/.launch_node0.json)
           id1=$(jq -r '.data.instance_ids[0]' terraform/.launch_node1.json)
 
+          echo "node0 id=$id0, node1 id=$id1"
+
           for i in $(seq 1 40); do
             r0=$(get_instance "$id0"); r1=$(get_instance "$id1")
-            s0=$(echo "$r0" | jq -r '.data.status'); s1=$(echo "$r1" | jq -r '.data.status')
+            s0=$(echo "$r0" | jq -r '.data.status // "PARSE_MISS"')
+            s1=$(echo "$r1" | jq -r '.data.status // "PARSE_MISS"')
             echo "attempt $i: node0=$s0 node1=$s1"
+            # If .data.status can't be found at all, something's wrong with the
+            # request/response shape itself (not just "still booting") — dump the raw
+            # body once so it's diagnosable from the log instead of guessing again.
+            if [[ "$i" -eq 1 || "$s0" == "PARSE_MISS" || "$s1" == "PARSE_MISS" ]]; then
+              echo "raw node0 response: $r0"
+              echo "raw node1 response: $r1"
+            fi
             [[ "$s0" == "active" && "$s1" == "active" ]] && break
             sleep 15
           done
