@@ -16,6 +16,9 @@ resource "null_resource" "gpu_node" {
     name          = "gpu-lab-${each.key}"
     instance_type = var.instance_type
     region        = var.region
+    # Destroy-time provisioners may only reference self/count.index/each.key, never
+    # var.* directly — stashing the API key here is the documented workaround.
+    api_key       = var.lambda_api_key
   }
 
   provisioner "local-exec" {
@@ -33,7 +36,7 @@ resource "null_resource" "gpu_node" {
     command = <<-EOT
       id=$(jq -r '.data.instance_ids[0]' ${path.module}/.launch_${each.key}.json 2>/dev/null || echo "")
       if [ -n "$id" ]; then
-        curl -sS -u "${var.lambda_api_key}:" -X POST \
+        curl -sS -u "${self.triggers.api_key}:" -X POST \
           https://cloud.lambdalabs.com/api/v1/instance-operations/terminate \
           -H 'Content-Type: application/json' \
           -d "{\"instance_ids\":[\"$id\"]}"
