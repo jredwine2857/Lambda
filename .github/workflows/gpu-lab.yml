@@ -91,8 +91,20 @@ jobs:
         run: |
           set -euo pipefail
           source lambda_cloud_api.sh
+
+          # Terraform's own console redacts local-exec output for this resource
+          # (its command interpolates a sensitive var), so the launch call's actual
+          # response is otherwise invisible. The files on disk aren't redacted, though.
+          echo "raw launch response node0: $(cat terraform/.launch_node0.json)"
+          echo "raw launch response node1: $(cat terraform/.launch_node1.json)"
+
           id0=$(jq -r '.data.instance_ids[0]' terraform/.launch_node0.json)
           id1=$(jq -r '.data.instance_ids[0]' terraform/.launch_node1.json)
+
+          if [[ "$id0" == "null" || "$id1" == "null" ]]; then
+            echo "Launch never returned an instance ID — nothing was created, see raw response(s) above." >&2
+            exit 1
+          fi
 
           echo "node0 id=$id0, node1 id=$id1"
 

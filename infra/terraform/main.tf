@@ -35,7 +35,7 @@ resource "null_resource" "gpu_node" {
     when    = destroy
     command = <<-EOT
       id=$(jq -r '.data.instance_ids[0]' ${path.module}/.launch_${each.key}.json 2>/dev/null || echo "")
-      if [ -n "$id" ]; then
+      if [ -n "$id" ] && [ "$id" != "null" ]; then
         curl -sS -u "${self.triggers.api_key}:" -X POST \
           https://cloud.lambdalabs.com/api/v1/instance-operations/terminate \
           -H 'Content-Type: application/json' \
