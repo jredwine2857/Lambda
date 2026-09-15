@@ -11,7 +11,18 @@ if ! command -v docker &>/dev/null; then
   sudo usermod -aG docker "$USER"
 fi
 
-if ! dpkg -l | grep -q nvidia-container-toolkit; then
+if dpkg -s nvidia-container-toolkit &>/dev/null; then
+  echo "nvidia-container-toolkit already installed by the base image, skipping."
+elif grep -rq "nvidia.github.io/libnvidia-container" /etc/apt/sources.list /etc/apt/sources.list.d/ /etc/apt/cloud-init.gpg.d/ 2>/dev/null; then
+  # Lambda's stock GPU images pre-configure this apt source via cloud-init. Adding our
+  # own copy with a different keyring path breaks apt entirely ("Conflicting values
+  # set for option Signed-By") — reuse the existing source instead of duplicating it.
+  echo "NVIDIA container toolkit apt source already present, installing package directly."
+  sudo apt-get update -y
+  sudo apt-get install -y nvidia-container-toolkit
+  sudo nvidia-ctk runtime configure --runtime=docker
+  sudo systemctl restart docker
+else
   curl -fsSL https://nvidia.github.io/libnvidia-container/gpgkey | sudo gpg --dearmor -o /usr/share/keyrings/nvidia-container-toolkit-keyring.gpg
   curl -s -L https://nvidia.github.io/libnvidia-container/stable/deb/nvidia-container-toolkit.list | \
     sed 's#deb https://#deb [signed-by=/usr/share/keyrings/nvidia-container-toolkit-keyring.gpg] https://#g' | \
