@@ -148,7 +148,7 @@ jobs:
           declare -A ips=( [0]="${{ steps.ips.outputs.node0_ip }}" [1]="${{ steps.ips.outputs.node1_ip }}" )
           for rank in 0 1; do
             ip="${ips[$rank]}"
-            for attempt in $(seq 1 10); do
+            for _ in $(seq 1 10); do
               ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10 -i ~/.ssh/id_ed25519 ubuntu@"$ip" true && break
               sleep 10
             done
@@ -182,7 +182,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: |
-          source ~/venv/bin/activate
           MASTER_ADDR=${{ needs.provision.outputs.node0_ip }} NODE_RANK=0 \
             bash distributed/launch_distributed.sh nccl
 
@@ -193,7 +192,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: |
-          source ~/venv/bin/activate
           MASTER_ADDR=${{ needs.provision.outputs.node0_ip }} NODE_RANK=1 \
             bash distributed/launch_distributed.sh nccl
 
@@ -206,7 +204,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: |
-          source ~/venv/bin/activate
           MASTER_ADDR=${{ needs.provision.outputs.node0_ip }} NODE_RANK=0 \
             bash distributed/launch_distributed.sh ddp
 
@@ -217,7 +214,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: |
-          source ~/venv/bin/activate
           MASTER_ADDR=${{ needs.provision.outputs.node0_ip }} NODE_RANK=1 \
             bash distributed/launch_distributed.sh ddp
 
@@ -230,7 +226,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: |
-          source ~/venv/bin/activate
           cd inference
           MODEL_NAME="${MODEL_NAME:-Qwen/Qwen2.5-1.5B-Instruct}" bash vllm_serve.sh --background
 
