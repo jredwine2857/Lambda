@@ -3,7 +3,7 @@
 # substitution) and brings up Prometheus + Grafana with host networking.
 # Usage: NODE1_IP=<node1's ip> bash start.sh
 set -euo pipefail
-: "${NODE1_IP:?Set NODE1_IP to node1's IP address}"
+: "${NODE1_IP:?Set NODE1_IP to the node1 IP address}"
 cd "$(dirname "${BASH_SOURCE[0]}")"
 
 sed "s/__NODE1_IP__/${NODE1_IP}/g" prometheus.yml.template > prometheus.yml

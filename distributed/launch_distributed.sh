@@ -3,7 +3,7 @@
 # Usage: MASTER_ADDR=<node0 ip> NODE_RANK={0,1} bash launch_distributed.sh {nccl|ddp}
 set -euo pipefail
 
-: "${MASTER_ADDR:?Set MASTER_ADDR to node0's IP (same value on both nodes)}"
+: "${MASTER_ADDR:?Set MASTER_ADDR to the node0 IP (same value on both nodes)}"
 : "${NODE_RANK:?Set NODE_RANK to 0 on node0, 1 on node1}"
 MASTER_PORT="${MASTER_PORT:-29500}"
 

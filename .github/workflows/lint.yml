@@ -1,0 +1,57 @@
+name: Lint
+
+# Runs on GitHub-hosted runners only — never self-hosted — so it's safe to trigger
+# from pull requests on a public repo.
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  shell-syntax:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+
+      # A syntax error here previously cost a full provision cycle: two GPUs were
+      # launched and configured for ~12 minutes before the job that used the script
+      # failed instantly on a stray apostrophe. Catch it for free instead.
+      - name: bash -n every shell script
+        run: |
+          rc=0
+          while IFS= read -r f; do
+            if bash -n "$f"; then
+              echo "ok   $f"
+            else
+              echo "FAIL $f"
+              rc=1
+            fi
+          done < <(find . -name '*.sh' -not -path './.git/*')
+          exit $rc
+
+      - name: Validate Python syntax
+        run: |
+          python3 -m compileall -q distributed inference load_test
+
+  terraform:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hashicorp/setup-terraform@v3
+      - name: terraform fmt + validate
+        working-directory: infra/terraform
+        run: |
+          terraform init -backend=false
+          terraform validate
+
+  actionlint:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: Lint workflow files
+        run: |
+          bash <(curl -sSL https://raw.githubusercontent.com/rhysd/actionlint/main/scripts/download-actionlint.bash)
+          ./actionlint -color
