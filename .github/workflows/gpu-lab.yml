@@ -1,0 +1,298 @@
+name: GPU Lab Pipeline
+
+# Manual trigger ONLY. This is deliberate: self-hosted runners + a trigger that can be
+# fired by an untrusted pull_request (even on a public fork) is a well-known way to get
+# arbitrary code execution on your own infrastructure. workflow_dispatch requires
+# write access to this repo to fire, so it's safe to pair with self-hosted runners.
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "full = provision, benchmark, teardown. destroy_only = emergency teardown if a previous run got stuck."
+        type: choice
+        options: [full, destroy_only]
+        default: full
+
+# Never let two runs provision/destroy the same cluster at once.
+concurrency:
+  group: gpu-lab
+  cancel-in-progress: false
+
+env:
+  TF_VAR_lambda_api_key: ${{ secrets.LAMBDA_API_KEY }}
+  TF_VAR_ssh_key_name: ${{ secrets.SSH_KEY_NAME }}
+
+jobs:
+  # ---------------------------------------------------------------------------------
+  destroy-only:
+    if: github.event.inputs.mode == 'destroy_only'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/cache/restore@v4
+        with:
+          path: |
+            infra/terraform/terraform.tfstate
+            infra/terraform/.launch_node0.json
+            infra/terraform/.launch_node1.json
+          key: tfstate-${{ github.run_id }}
+          restore-keys: tfstate-
+      - uses: hashicorp/setup-terraform@v3
+      - name: terraform destroy
+        working-directory: infra/terraform
+        run: |
+          terraform init
+          terraform destroy -auto-approve
+      - uses: actions/cache/save@v4
+        if: always()
+        continue-on-error: true   # e.g. nothing existed yet to cache — not a real failure
+        with:
+          path: |
+            infra/terraform/terraform.tfstate
+            infra/terraform/.launch_node0.json
+            infra/terraform/.launch_node1.json
+          key: tfstate-${{ github.run_id }}-destroyonly
+
+  # ---------------------------------------------------------------------------------
+  provision:
+    if: github.event.inputs.mode == 'full'
+    runs-on: ubuntu-latest
+    # Node setup pulls multi-GB wheels; generous, but far short of the 6-hour default.
+    timeout-minutes: 45
+    outputs:
+      node0_ip: ${{ steps.ips.outputs.node0_ip }}
+      node1_ip: ${{ steps.ips.outputs.node1_ip }}
+    steps:
+      - uses: actions/checkout@v4
+      # Terraform's local state file only lives on this job's throwaway VM — without
+      # this, `teardown` (a separate job, separate VM) has no idea what was created
+      # and silently destroys nothing. Cache it under a key that changes every run
+      # (so `save` below always writes a fresh entry) but restores from the latest
+      # prior run via the `tfstate-` prefix.
+      - uses: actions/cache/restore@v4
+        with:
+          path: |
+            infra/terraform/terraform.tfstate
+            infra/terraform/.launch_node0.json
+            infra/terraform/.launch_node1.json
+          key: tfstate-${{ github.run_id }}
+          restore-keys: tfstate-
+      - uses: hashicorp/setup-terraform@v3
+
+      - name: terraform apply
+        working-directory: infra/terraform
+        run: |
+          terraform init
+          terraform apply -auto-approve
+
+      - name: Wait for instances to go active, capture IPs
+        id: ips
+        working-directory: infra
+        env:
+          LAMBDA_API_KEY: ${{ secrets.LAMBDA_API_KEY }}
+        run: |
+          set -euo pipefail
+          source lambda_cloud_api.sh
+
+          # Terraform's own console redacts local-exec output for this resource
+          # (its command interpolates a sensitive var), so the launch call's actual
+          # response is otherwise invisible. The files on disk aren't redacted, though.
+          echo "raw launch response node0: $(cat terraform/.launch_node0.json)"
+          echo "raw launch response node1: $(cat terraform/.launch_node1.json)"
+
+          id0=$(jq -r '.data.instance_ids[0]' terraform/.launch_node0.json)
+          id1=$(jq -r '.data.instance_ids[0]' terraform/.launch_node1.json)
+
+          if [[ "$id0" == "null" || "$id1" == "null" ]]; then
+            echo "Launch never returned an instance ID — nothing was created, see raw response(s) above." >&2
+            exit 1
+          fi
+
+          echo "node0 id=$id0, node1 id=$id1"
+
+          for i in $(seq 1 40); do
+            r0=$(get_instance "$id0"); r1=$(get_instance "$id1")
+            s0=$(echo "$r0" | jq -r '.data.status // "PARSE_MISS"')
+            s1=$(echo "$r1" | jq -r '.data.status // "PARSE_MISS"')
+            echo "attempt $i: node0=$s0 node1=$s1"
+            # If .data.status can't be found at all, something's wrong with the
+            # request/response shape itself (not just "still booting") — dump the raw
+            # body once so it's diagnosable from the log instead of guessing again.
+            if [[ "$i" -eq 1 || "$s0" == "PARSE_MISS" || "$s1" == "PARSE_MISS" ]]; then
+              echo "raw node0 response: $r0"
+              echo "raw node1 response: $r1"
+            fi
+            [[ "$s0" == "active" && "$s1" == "active" ]] && break
+            sleep 15
+          done
+
+          ip0=$(echo "$r0" | jq -r '.data.ip')
+          ip1=$(echo "$r1" | jq -r '.data.ip')
+          [[ -n "$ip0" && "$ip0" != "null" && -n "$ip1" && "$ip1" != "null" ]] || { echo "Instances never became active" >&2; exit 1; }
+
+          echo "node0_ip=$ip0" >> "$GITHUB_OUTPUT"
+          echo "node1_ip=$ip1" >> "$GITHUB_OUTPUT"
+
+      - name: Register self-hosted runners (persistent — they serve several jobs in this run)
+        env:
+          GH_TOKEN: ${{ secrets.GH_PAT }}
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.ssh
+          echo "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+
+          reg_token=$(gh api -X POST "repos/${{ github.repository }}/actions/runners/registration-token" -q .token)
+          repo_url="${{ github.server_url }}/${{ github.repository }}"
+
+          declare -A ips=( [0]="${{ steps.ips.outputs.node0_ip }}" [1]="${{ steps.ips.outputs.node1_ip }}" )
+          for rank in 0 1; do
+            ip="${ips[$rank]}"
+            for _ in $(seq 1 10); do
+              ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10 -i ~/.ssh/id_ed25519 ubuntu@"$ip" true && break
+              sleep 10
+            done
+            scp -o StrictHostKeyChecking=no -i ~/.ssh/id_ed25519 \
+              scripts/00_setup_node.sh scripts/install_gh_runner.sh ubuntu@"$ip":~
+            ssh -o StrictHostKeyChecking=no -i ~/.ssh/id_ed25519 ubuntu@"$ip" \
+              "bash 00_setup_node.sh && bash install_gh_runner.sh '$repo_url' '$reg_token' 'gpu-lab-node${rank}'"
+          done
+
+      # Runs even if a prior step in this job failed (e.g. instances launched but
+      # never went active) — that's exactly when `teardown` most needs real state.
+      - uses: actions/cache/save@v4
+        if: always()
+        continue-on-error: true
+        with:
+          path: |
+            infra/terraform/terraform.tfstate
+            infra/terraform/.launch_node0.json
+            infra/terraform/.launch_node1.json
+          key: tfstate-${{ github.run_id }}-provision
+
+  # ---------------------------------------------------------------------------------
+  # NCCL bandwidth test — both jobs depend only on `provision`, so GitHub Actions
+  # starts them in parallel, which is what a torchrun multi-node rendezvous needs.
+  nccl-node0:
+    needs: provision
+    runs-on: [self-hosted, gpu-lab-node0]
+    # A failed NCCL rendezvous hangs rather than erroring; without this it would hang
+    # for GitHub's 6-hour default while both GPUs bill.
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - run: |
+          MASTER_ADDR=${{ needs.provision.outputs.node0_ip }} NODE_RANK=0 \
+            bash distributed/launch_distributed.sh nccl
+
+  nccl-node1:
+    needs: provision
+    runs-on: [self-hosted, gpu-lab-node1]
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - run: |
+          MASTER_ADDR=${{ needs.provision.outputs.node0_ip }} NODE_RANK=1 \
+            bash distributed/launch_distributed.sh nccl
+
+  # ---------------------------------------------------------------------------------
+  # Multi-node DDP training — only after both NCCL jobs prove the network is healthy.
+  ddp-node0:
+    needs: [nccl-node0, nccl-node1, provision]
+    runs-on: [self-hosted, gpu-lab-node0]
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - run: |
+          MASTER_ADDR=${{ needs.provision.outputs.node0_ip }} NODE_RANK=0 \
+            bash distributed/launch_distributed.sh ddp
+
+  ddp-node1:
+    needs: [nccl-node0, nccl-node1, provision]
+    runs-on: [self-hosted, gpu-lab-node1]
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - run: |
+          MASTER_ADDR=${{ needs.provision.outputs.node0_ip }} NODE_RANK=1 \
+            bash distributed/launch_distributed.sh ddp
+
+  # ---------------------------------------------------------------------------------
+  deploy-vllm:
+    needs: [ddp-node0, ddp-node1, provision]
+    runs-on: [self-hosted, gpu-lab-node0]
+    # First run downloads model weights from HF before the server becomes healthy.
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - run: |
+          cd inference
+          MODEL_NAME="${MODEL_NAME:-Qwen/Qwen2.5-1.5B-Instruct}" bash vllm_serve.sh --background
+
+  # ---------------------------------------------------------------------------------
+  load-test:
+    needs: [deploy-vllm, provision]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install locust
+      - name: Headless Locust run against node0's public IP
+        run: |
+          cd load_test
+          locust -f locustfile.py --host "http://${{ needs.provision.outputs.node0_ip }}:8000" \
+            --headless -u 10 -r 2 -t 90s --csv=results
+      - uses: actions/upload-artifact@v4
+        with:
+          name: load-test-results
+          path: load_test/results_*
+
+  # ---------------------------------------------------------------------------------
+  # Always runs when mode=full, success or failure — leaving GPU nodes billing because
+  # a step failed partway is the single most expensive mistake this pipeline can make.
+  teardown:
+    if: always() && github.event.inputs.mode == 'full'
+    needs: [provision, nccl-node0, nccl-node1, ddp-node0, ddp-node1, deploy-vllm, load-test]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      # Pulls in whatever `provision` (a separate VM) actually created — without this
+      # restore, this job has no state and "successfully" destroys nothing.
+      - uses: actions/cache/restore@v4
+        with:
+          path: |
+            infra/terraform/terraform.tfstate
+            infra/terraform/.launch_node0.json
+            infra/terraform/.launch_node1.json
+          key: tfstate-${{ github.run_id }}
+          restore-keys: tfstate-
+      - uses: hashicorp/setup-terraform@v3
+
+      - name: Deregister self-hosted runners (best-effort)
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ secrets.GH_PAT }}
+        run: |
+          for id in $(gh api "repos/${{ github.repository }}/actions/runners" -q '.runners[] | select(.name | test("gpu-lab")) | .id'); do
+            gh api -X DELETE "repos/${{ github.repository }}/actions/runners/$id" || true
+          done
+
+      - name: terraform destroy
+        working-directory: infra/terraform
+        run: |
+          terraform init
+          terraform destroy -auto-approve
+
+      - uses: actions/cache/save@v4
+        if: always()
+        continue-on-error: true
+        with:
+          path: |
+            infra/terraform/terraform.tfstate
+            infra/terraform/.launch_node0.json
+            infra/terraform/.launch_node1.json
+          key: tfstate-${{ github.run_id }}-teardown

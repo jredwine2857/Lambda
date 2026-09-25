@@ -1,0 +1,16 @@
+global:
+  scrape_interval: 5s
+
+scrape_configs:
+  - job_name: dcgm
+    static_configs:
+      - targets: ["localhost:9400", "__NODE1_IP__:9400"]
+
+  - job_name: node
+    static_configs:
+      - targets: ["localhost:9100", "__NODE1_IP__:9100"]
+
+  - job_name: vllm
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["localhost:8000"]

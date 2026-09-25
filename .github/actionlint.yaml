@@ -1,0 +1,4 @@
+self-hosted-runner:
+  labels:
+    - gpu-lab-node0
+    - gpu-lab-node1
